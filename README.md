@@ -18,27 +18,26 @@ plugin use logic
 
 ```nushell
 # Filter by literal values
-ls | solve {type: "file"}
+ls | solve [type file]
 
-# Bind variables — $stem becomes a new column
-ls | solve {type: "file", name: "$f"} | select f size
+# Bind variables — &f becomes a new column
+ls | solve [type file, name &f] | select f size
 
 # String decomposition — split on structure
-ls src/**/* | solve {type: "file", name: "$path.$ext"} | select path ext size
+ls src/**/* | solve [type file, name &path.&ext] | select path ext size
 ```
 
-String patterns support multiple variables: `"$name.$ext"` splits `"main.rs"` into `name=main`, `ext=rs`. Variables capture up to the next literal delimiter. The last variable captures the remainder.
+String patterns support multiple variables: `&name.&ext` splits `"main.rs"` into `name=main`, `ext=rs`. Variables capture up to the next literal delimiter. The last variable captures the remainder.
 
-**Multi-source** (pipeline): pass a record-of-tables. Shared variable names across sources become join conditions.
+Record syntax works too — `{type: "file", name: "&path.&ext"}` is equivalent to `[type file, name &path.&ext]`.
+
+**Multi-source** (inline): pass data and patterns together in one list. Shared variable names across patterns become join conditions.
 
 ```nushell
 let proc = [{pid: 1, name: "nginx"}, {pid: 2, name: "postgres"}]
 let ports = [{pid: 1, port: 80}, {pid: 1, port: 443}, {pid: 2, port: 5432}]
 
-{proc: $proc, ports: $ports} | solve {
-  proc: {pid: "$pid", name: "$name"},
-  ports: {pid: "$pid", port: "$port"}
-}
+solve [$proc [pid &pid, name &name], $ports [pid &pid, port &port]]
 # => pid | name     | port
 #      1 | nginx    |   80
 #      1 | nginx    |  443
@@ -49,34 +48,42 @@ This works with any number of sources. Variables scoped naturally — use `let` 
 
 ```nushell
 # Three-way join
-{proc: $proc, ports: $ports, deploy: $deploy} | solve {
-  proc: {pid: "$pid", name: "$name"},
-  ports: {pid: "$pid", port: "$port"},
-  deploy: {name: "$name", env: "$env"}
-}
+solve [
+  $proc [pid &pid, name &name],
+  $ports [pid &pid, port &port],
+  $deploy [name &name, env &env]
+]
 ```
 
-**Multi-source** (fact store): for interactive sessions where you want to store data and query it multiple times.
+**Multi-source** (fact store): for interactive sessions. Use `@name` to reference stored facts.
 
 ```nushell
 ps | facts proc
 ss -tlnp | from ssv | facts ports
 
-solve {
-  proc: {pid: "$pid", name: "$name"},
-  ports: {pid: "$pid", port: "$port"}
-}
+solve [@proc [pid &pid, name &name], @ports [pid &pid, port &port]]
 ```
 
-Pipeline sources are checked first. If the input isn't a matching record-of-tables, `solve` falls back to the fact store.
+**Mixed sources**: combine inline data with stored facts in the same query.
+
+```nushell
+solve [$fresh_data [pid &pid, name &name], @stored_ports [pid &pid, port &port]]
+```
+
+**Multi-source** (pipeline): pass a record-of-tables. Pattern uses record syntax.
+
+```nushell
+{proc: $proc, ports: $ports} | solve {
+  proc: {pid: "&pid", name: "&name"},
+  ports: {pid: "&pid", port: "&port"}
+}
+```
 
 **Composability**: `solve` returns a standard Nushell table. Pipe into `where`, `sort-by`, `select`, `first`, etc.
 
 ```nushell
-{proc: $proc, ports: $ports} | solve {
-  proc: {pid: "$pid", name: "$name", mem: "$mem"},
-  ports: {pid: "$pid", port: "$port"}
-} | where port < 1024 | sort-by mem -r
+solve [$proc [pid &pid, name &name, mem &mem], $ports [pid &pid, port &port]]
+  | where port < 1024 | sort-by mem -r
 ```
 
 Results stream lazily — `first N` short-circuits after N solutions.
@@ -106,16 +113,22 @@ Facts persist for the Nushell session (the plugin process lifetime). They're use
 
 ## Pattern syntax
 
+Patterns can use list syntax `[k v]` or record syntax `{k: v}` interchangeably.
+
 | Pattern | Meaning |
 |---|---|
-| `"$name"` | Logic variable — binds to matched value |
-| `"hello"` | Literal — must match exactly |
-| `"$stem.rs"` | String pattern — decomposes strings |
-| `"$a.$b.$c"` | Multi-variable — splits on literal delimiters |
+| `&name` | Logic variable — binds to matched value |
+| `hello`, `"hello"` | Literal — must match exactly |
+| `&stem.rs` | String pattern — decomposes strings |
+| `&a.&b.&c` | Multi-variable — splits on literal delimiters |
 | `42`, `true` | Non-string literals — exact match |
-| `{k: pat}` | Record pattern — each field matched, extras ignored |
+| `[k v k v]` | Record pattern (list form) — each field matched, extras ignored |
+| `{k: v}` | Record pattern (record form) — same semantics |
 
-Variables are `$`-prefixed strings. Nushell evaluates real `$variables` before the plugin sees them, so `"$pid"` is a string literal that the plugin interprets as a logic variable.
+**Prefix conventions:**
+- `&x` — logic variable (output: the plugin binds this during matching)
+- `$x` — nushell variable (input: evaluated before the plugin sees it)
+- `@x` — fact store reference (resolved by the plugin from stored data)
 
 ## When to use solve vs join
 
@@ -124,15 +137,15 @@ Variables are `$`-prefixed strings. Nushell evaluates real `$variables` before t
 | Two sources, one shared key | Works well | Works, no advantage |
 | Two sources, multiple shared keys | Polars or manual loops | Handles naturally |
 | Three+ sources | Chain joins, manage intermediates | One pattern |
-| String decomposition | `path parse`, manual `insert` | `"$stem.$ext"` |
+| String decomposition | `path parse`, manual `insert` | `&stem.&ext` |
 | Filter + extract | `where` + `get` chains | One pattern |
 
 ## Known limitations
 
-- **Fact scoping**: facts are global to the session. Use the pipeline approach (`{a: $a, b: $b} | solve {...}`) for scoped queries, or `facts --clear` to clean up.
-- **Single-variable string patterns use leftmost matching**: `"$a.$b"` against `"x.y.z"` gives `a=x`, `b=y.z`. There's no backtracking within string patterns.
+- **Fact scoping**: facts are global to the session. Use inline sources (`solve [$data [pattern]]`) for scoped queries, or `facts --clear` to clean up.
+- **Leftmost string matching**: `&a.&b` against `"x.y.z"` gives `a=x`, `b=y.z`. There's no backtracking within string patterns.
 - **No arithmetic or conditions in patterns**: use `where` after `solve` for filtering on computed values.
-- **Cross-product risk**: joining large fact sets (N×M×K) can produce many results. Use `first N` to limit, or filter sources before storing.
+- **Cross-product risk**: joining large sources (N×M×K) can produce many results. Use `first N` to limit, or filter sources before joining.
 
 ## Architecture
 

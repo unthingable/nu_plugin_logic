@@ -113,7 +113,7 @@ mod tests {
         let pattern_val = {
             let mut r = Record::new();
             r.push("type", Value::string("file", span()));
-            r.push("name", Value::string("$f", span()));
+            r.push("name", Value::string("&f", span()));
             Value::record(r, span())
         };
         let pattern = value_to_pattern(&pattern_val);
@@ -145,7 +145,7 @@ mod tests {
 
         let pattern_val = {
             let mut r = Record::new();
-            r.push("name", Value::string("$stem.rs", span()));
+            r.push("name", Value::string("&stem.rs", span()));
             Value::record(r, span())
         };
         let pattern = value_to_pattern(&pattern_val);

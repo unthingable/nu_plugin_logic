@@ -2,15 +2,15 @@ use nu_protocol::Value;
 
 use super::term::{StringPatternPart, Term};
 
-/// Parse a string like "$stem.rs" into pattern parts.
-/// `$`-prefixed word characters become variables, everything else is literal.
+/// Parse a string like "&stem.rs" into pattern parts.
+/// `&`-prefixed word characters become logic variables, everything else is literal.
 pub fn parse_string_pattern(s: &str) -> Vec<StringPatternPart> {
     let mut parts = Vec::new();
     let mut chars = s.chars().peekable();
     let mut literal = String::new();
 
     while let Some(c) = chars.next() {
-        if c == '$' {
+        if c == '&' {
             let mut var_name = String::new();
             while let Some(&nc) = chars.peek() {
                 if nc.is_alphanumeric() || nc == '_' {
@@ -21,8 +21,8 @@ pub fn parse_string_pattern(s: &str) -> Vec<StringPatternPart> {
                 }
             }
             if var_name.is_empty() {
-                // Lone '$' — treat as literal
-                literal.push('$');
+                // Lone '&' — treat as literal
+                literal.push('&');
             } else {
                 if !literal.is_empty() {
                     parts.push(StringPatternPart::Literal(std::mem::take(&mut literal)));
@@ -43,9 +43,10 @@ pub fn parse_string_pattern(s: &str) -> Vec<StringPatternPart> {
 
 /// Convert a Nushell Value into a pattern Term.
 ///
-/// - `"$name"` (pure variable) → Variable
-/// - `"$stem.rs"` (variable + literals) → StringPattern
+/// - `"&name"` (pure variable) → Variable
+/// - `"&stem.rs"` (variable + literals) → StringPattern
 /// - Record values → Record of sub-patterns
+/// - List [k v k v] with string keys → Record of sub-patterns
 /// - Everything else → Literal
 pub fn value_to_pattern(value: &Value) -> Term {
     if let Value::String { val, .. } = value {
@@ -70,5 +71,33 @@ pub fn value_to_pattern(value: &Value) -> Term {
         return Term::Record(fields);
     }
 
+    // List as record: [k v k v] → {k: v, k: v}
+    // Even-length list with plain string keys (not @-prefixed) at even positions.
+    if let Value::List { vals, .. } = value {
+        if is_kv_list(vals) {
+            let fields = vals
+                .chunks(2)
+                .map(|pair| {
+                    let key = match &pair[0] {
+                        Value::String { val, .. } => val.clone(),
+                        _ => unreachable!(),
+                    };
+                    (key, value_to_pattern(&pair[1]))
+                })
+                .collect();
+            return Term::Record(fields);
+        }
+    }
+
     Term::Literal(value.clone())
+}
+
+/// Check if a list looks like key-value pairs: even length, plain string keys
+/// (not @-prefixed, which are fact references).
+pub fn is_kv_list(vals: &[Value]) -> bool {
+    vals.len() >= 2
+        && vals.len() % 2 == 0
+        && vals.chunks(2).all(|pair| {
+            matches!(&pair[0], Value::String { val, .. } if !val.starts_with('@'))
+        })
 }

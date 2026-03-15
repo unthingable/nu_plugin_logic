@@ -9,7 +9,7 @@ pub enum Term {
     Variable(String),
     /// Open record pattern: each field must match, extra fields in the value are ignored.
     Record(Vec<(String, Term)>),
-    /// String decomposition pattern, e.g. "$stem.rs".
+    /// String decomposition pattern, e.g. "&stem.rs".
     StringPattern(Vec<StringPatternPart>),
 }
 

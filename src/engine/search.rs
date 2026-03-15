@@ -154,14 +154,14 @@ mod tests {
 
         let proc_pattern = {
             let mut r = Record::new();
-            r.push("pid", Value::string("$pid", span()));
-            r.push("name", Value::string("$name", span()));
+            r.push("pid", Value::string("&pid", span()));
+            r.push("name", Value::string("&name", span()));
             value_to_pattern(&Value::record(r, span()))
         };
         let ports_pattern = {
             let mut r = Record::new();
-            r.push("pid", Value::string("$pid", span()));
-            r.push("port", Value::string("$port", span()));
+            r.push("pid", Value::string("&pid", span()));
+            r.push("port", Value::string("&port", span()));
             value_to_pattern(&Value::record(r, span()))
         };
 
@@ -189,14 +189,14 @@ mod tests {
 
         let proc_pattern = {
             let mut r = Record::new();
-            r.push("pid", Value::string("$pid", span()));
-            r.push("name", Value::string("$name", span()));
+            r.push("pid", Value::string("&pid", span()));
+            r.push("name", Value::string("&name", span()));
             value_to_pattern(&Value::record(r, span()))
         };
         let ports_pattern = {
             let mut r = Record::new();
-            r.push("pid", Value::string("$pid", span()));
-            r.push("port", Value::string("$port", span()));
+            r.push("pid", Value::string("&pid", span()));
+            r.push("port", Value::string("&port", span()));
             value_to_pattern(&Value::record(r, span()))
         };
 
