@@ -86,9 +86,7 @@ impl Iterator for SearchIterator {
 fn sub_to_record(sub: Substitution, span: Span) -> Value {
     let bindings = sub.into_bindings();
     let mut record = Record::new();
-    let mut entries: Vec<_> = bindings.into_iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, value) in entries {
+    for (name, value) in bindings {
         record.push(name, value);
     }
     Value::record(record, span)
