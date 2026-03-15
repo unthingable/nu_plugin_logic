@@ -1,54 +1,53 @@
 use nu_protocol::{Record, Span, Value};
 
-use super::search;
+use super::search::SearchIterator;
 use super::substitution::Substitution;
 use super::term::Term;
 use super::unify::unify;
 use super::LogicEngine;
-use crate::store::FactStore;
 
 /// Hand-rolled unification + backtracking engine.
 /// No external dependencies beyond nu-protocol.
 pub struct NativeEngine;
 
 impl LogicEngine for NativeEngine {
-    fn filter(&self, pattern: &Term, input: &[Value], span: Span) -> Vec<Value> {
-        input
-            .iter()
-            .filter_map(|row| {
-                let mut sub = Substitution::new();
-                if !unify(pattern, row, &mut sub) {
-                    return None;
+    fn filter(
+        &self,
+        pattern: Term,
+        input: Vec<Value>,
+        span: Span,
+    ) -> Box<dyn Iterator<Item = Value> + Send> {
+        Box::new(input.into_iter().filter_map(move |row| {
+            let mut sub = Substitution::new();
+            if !unify(&pattern, &row, &mut sub) {
+                return None;
+            }
+            let bindings = sub.into_bindings();
+            if bindings.is_empty() {
+                return Some(row);
+            }
+            let Value::Record { val: record, .. } = &row else {
+                return Some(row);
+            };
+            let mut result = Record::new();
+            for (col, val) in record.iter() {
+                result.push(col.to_string(), val.clone());
+            }
+            for (name, value) in bindings {
+                if result.get(&name).is_none() {
+                    result.push(name, value);
                 }
-                let bindings = sub.into_bindings();
-                if bindings.is_empty() {
-                    return Some(row.clone());
-                }
-                // Rebuild the record with variable bindings merged in
-                let Value::Record { val: record, .. } = row else {
-                    return Some(row.clone());
-                };
-                let mut result = Record::new();
-                for (col, val) in record.iter() {
-                    result.push(col.to_string(), val.clone());
-                }
-                for (name, value) in bindings {
-                    if result.get(&name).is_none() {
-                        result.push(name, value);
-                    }
-                }
-                Some(Value::record(result, span))
-            })
-            .collect()
+            }
+            Some(Value::record(result, span))
+        }))
     }
 
     fn search(
         &self,
-        queries: &[(String, Term)],
-        store: &FactStore,
+        sources: Vec<(Term, Vec<Value>)>,
         span: Span,
-    ) -> Result<Vec<Value>, String> {
-        search::search(queries, store, span)
+    ) -> Box<dyn Iterator<Item = Value> + Send> {
+        Box::new(SearchIterator::new(sources, span))
     }
 }
 
@@ -86,7 +85,7 @@ mod tests {
         };
         let pattern = value_to_pattern(&pattern_val);
 
-        let results = engine.filter(&pattern, &rows, span());
+        let results: Vec<_> = engine.filter(pattern, rows, span()).collect();
         assert_eq!(results.len(), 1);
         if let Value::Record { val, .. } = &results[0] {
             assert_eq!(val.get("name"), Some(&Value::string("main.rs", span())));
@@ -119,7 +118,7 @@ mod tests {
         };
         let pattern = value_to_pattern(&pattern_val);
 
-        let results = engine.filter(&pattern, &rows, span());
+        let results: Vec<_> = engine.filter(pattern, rows, span()).collect();
         assert_eq!(results.len(), 1);
         if let Value::Record { val, .. } = &results[0] {
             assert_eq!(val.get("f"), Some(&Value::string("main.rs", span())));
@@ -151,7 +150,7 @@ mod tests {
         };
         let pattern = value_to_pattern(&pattern_val);
 
-        let results = engine.filter(&pattern, &rows, span());
+        let results: Vec<_> = engine.filter(pattern, rows, span()).collect();
         assert_eq!(results.len(), 1);
         if let Value::Record { val, .. } = &results[0] {
             assert_eq!(val.get("stem"), Some(&Value::string("main", span())));

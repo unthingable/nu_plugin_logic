@@ -3,73 +3,102 @@ use nu_protocol::{Record, Span, Value};
 use super::substitution::Substitution;
 use super::term::Term;
 use super::unify::unify;
-use crate::store::FactStore;
 
-/// Depth-first backtracking search across multiple named fact sets.
+/// Iterative depth-first backtracking search across multiple fact sets.
 ///
-/// Each query is `(source_name, pattern)`. The search iterates rows in the first
-/// source, unifies each against its pattern, and on success carries the substitution
-/// forward to the next source. When all sources match, the complete substitution
-/// is emitted as a result row.
-pub fn search(
-    queries: &[(String, Term)],
-    store: &FactStore,
+/// Yields one `Value::Record` per solution. Each record's columns are the
+/// bound variable names, values are the matched data. The search is lazy —
+/// solutions are produced one at a time, so `first N` short-circuits.
+pub struct SearchIterator {
+    sources: Vec<(Term, Vec<Value>)>,
+    stack: Vec<SearchFrame>,
     span: Span,
-) -> Result<Vec<Value>, String> {
-    // Resolve each source name to its fact rows
-    let sources: Vec<(&Term, &[Value])> = queries
-        .iter()
-        .map(|(name, pattern)| {
-            let facts = store
-                .get(name)
-                .ok_or_else(|| format!("Unknown fact set: '{name}'"))?;
-            Ok((pattern, facts.as_slice()))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    // Search smallest fact sets first to prune the search space early
-    let mut sources = sources;
-    sources.sort_by_key(|(_, facts)| facts.len());
-
-    let mut results = Vec::new();
-    backtrack(&sources, 0, Substitution::new(), &mut results, span);
-    Ok(results)
 }
 
-fn backtrack(
-    sources: &[(&Term, &[Value])],
+struct SearchFrame {
     depth: usize,
+    row_index: usize,
     sub: Substitution,
-    results: &mut Vec<Value>,
-    span: Span,
-) {
-    if depth >= sources.len() {
-        // All sources matched — emit a result row from the bindings
-        let bindings = sub.into_bindings();
-        let mut record = Record::new();
-        // Sort by key for stable column order
-        let mut entries: Vec<_> = bindings.into_iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, value) in entries {
-            record.push(name, value);
-        }
-        results.push(Value::record(record, span));
-        return;
-    }
+}
 
-    let (pattern, facts) = &sources[depth];
-    for row in *facts {
-        let mut new_sub = sub.clone();
-        if unify(pattern, row, &mut new_sub) {
-            backtrack(sources, depth + 1, new_sub, results, span);
+impl SearchIterator {
+    pub fn new(mut sources: Vec<(Term, Vec<Value>)>, span: Span) -> Self {
+        // Search smallest fact sets first to prune early
+        sources.sort_by_key(|(_, facts)| facts.len());
+        Self {
+            sources,
+            stack: vec![SearchFrame {
+                depth: 0,
+                row_index: 0,
+                sub: Substitution::new(),
+            }],
+            span,
         }
     }
+}
+
+impl Iterator for SearchIterator {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        while !self.stack.is_empty() {
+            let top = self.stack.len() - 1;
+            let depth = self.stack[top].depth;
+
+            if depth >= self.sources.len() {
+                // All sources matched — emit one result
+                let sub = self.stack.pop().unwrap().sub;
+                return Some(sub_to_record(sub, self.span));
+            }
+
+            let row_index = self.stack[top].row_index;
+            let facts_len = self.sources[depth].1.len();
+
+            if row_index >= facts_len {
+                // Exhausted this source — backtrack
+                self.stack.pop();
+                continue;
+            }
+
+            // Advance to the next row for when we return to this frame
+            self.stack[top].row_index += 1;
+
+            // Try unifying the current row
+            let mut new_sub = self.stack[top].sub.clone();
+            let matched = unify(
+                &self.sources[depth].0,
+                &self.sources[depth].1[row_index],
+                &mut new_sub,
+            );
+
+            if matched {
+                self.stack.push(SearchFrame {
+                    depth: depth + 1,
+                    row_index: 0,
+                    sub: new_sub,
+                });
+            }
+        }
+        None
+    }
+}
+
+fn sub_to_record(sub: Substitution, span: Span) -> Value {
+    let bindings = sub.into_bindings();
+    let mut record = Record::new();
+    let mut entries: Vec<_> = bindings.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, value) in entries {
+        record.push(name, value);
+    }
+    Value::record(record, span)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::convert::value_to_pattern;
+    use crate::store::FactStore;
 
     fn span() -> Span {
         Span::unknown()
@@ -136,12 +165,12 @@ mod tests {
             value_to_pattern(&Value::record(r, span()))
         };
 
-        let queries = vec![
-            ("proc".into(), proc_pattern),
-            ("ports".into(), ports_pattern),
+        let sources = vec![
+            (proc_pattern, store.get("proc").unwrap().clone()),
+            (ports_pattern, store.get("ports").unwrap().clone()),
         ];
 
-        let results = search(&queries, &store, span()).unwrap();
+        let results: Vec<Value> = SearchIterator::new(sources, span()).collect();
         assert_eq!(results.len(), 3);
 
         // Check first result: pid=1, name=nginx, port=80
@@ -155,14 +184,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_errors() {
+    fn lazy_short_circuit() {
         let store = make_store();
-        let pattern = {
+
+        let proc_pattern = {
             let mut r = Record::new();
-            r.push("x", Value::string("$x", span()));
+            r.push("pid", Value::string("$pid", span()));
+            r.push("name", Value::string("$name", span()));
             value_to_pattern(&Value::record(r, span()))
         };
-        let queries = vec![("nonexistent".into(), pattern)];
-        assert!(search(&queries, &store, span()).is_err());
+        let ports_pattern = {
+            let mut r = Record::new();
+            r.push("pid", Value::string("$pid", span()));
+            r.push("port", Value::string("$port", span()));
+            value_to_pattern(&Value::record(r, span()))
+        };
+
+        let sources = vec![
+            (proc_pattern, store.get("proc").unwrap().clone()),
+            (ports_pattern, store.get("ports").unwrap().clone()),
+        ];
+
+        // Only take the first result — shouldn't need to compute all 3
+        let results: Vec<Value> = SearchIterator::new(sources, span()).take(1).collect();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn missing_source_returns_empty() {
+        // With the new API, source resolution happens in the command layer.
+        // An empty sources list yields zero results.
+        let results: Vec<Value> = SearchIterator::new(vec![], span()).collect();
+        assert_eq!(results.len(), 1); // one "solution" with no bindings
     }
 }

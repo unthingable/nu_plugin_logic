@@ -43,16 +43,12 @@ pub fn parse_string_pattern(s: &str) -> Vec<StringPatternPart> {
 
 /// Convert a Nushell Value into a pattern Term.
 ///
-/// - `"_"` → Wildcard
 /// - `"$name"` (pure variable) → Variable
 /// - `"$stem.rs"` (variable + literals) → StringPattern
 /// - Record values → Record of sub-patterns
 /// - Everything else → Literal
 pub fn value_to_pattern(value: &Value) -> Term {
     if let Value::String { val, .. } = value {
-        if val == "_" {
-            return Term::Wildcard;
-        }
         let parts = parse_string_pattern(val);
         return match parts.as_slice() {
             [StringPatternPart::Variable(name)] => Term::Variable(name.clone()),

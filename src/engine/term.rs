@@ -7,8 +7,6 @@ pub enum Term {
     Literal(Value),
     /// Binds to the matched value, or checks consistency if already bound.
     Variable(String),
-    /// Matches anything, binds nothing.
-    Wildcard,
     /// Open record pattern: each field must match, extra fields in the value are ignored.
     Record(Vec<(String, Term)>),
     /// String decomposition pattern, e.g. "$stem.rs".

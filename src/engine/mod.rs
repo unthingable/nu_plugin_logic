@@ -7,24 +7,30 @@ pub mod unify;
 
 use nu_protocol::{Span, Value};
 
-use crate::store::FactStore;
 use term::Term;
 
 /// Trait boundary for the logic engine.
 ///
 /// MVP: NativeEngine (hand-rolled unification + backtracking).
 /// Future: swap in Trealla-via-Wasmtime or Scryer for full Prolog support.
+///
+/// Both methods return lazy iterators so results stream through the pipeline.
+/// `first 5` after `solve` will short-circuit after 5 solutions.
 pub trait LogicEngine: Send + Sync {
     /// Single-source mode: filter input rows against a pattern,
     /// returning matches with variable bindings merged as new columns.
-    fn filter(&self, pattern: &Term, input: &[Value], span: Span) -> Vec<Value>;
+    fn filter(
+        &self,
+        pattern: Term,
+        input: Vec<Value>,
+        span: Span,
+    ) -> Box<dyn Iterator<Item = Value> + Send>;
 
-    /// Multi-source mode: backtracking search across named fact sets.
-    /// Returns a table of variable bindings (one row per solution).
+    /// Multi-source mode: backtracking search across resolved fact data.
+    /// Returns one row per solution, columns are variable bindings.
     fn search(
         &self,
-        queries: &[(String, Term)],
-        store: &FactStore,
+        sources: Vec<(Term, Vec<Value>)>,
         span: Span,
-    ) -> Result<Vec<Value>, String>;
+    ) -> Box<dyn Iterator<Item = Value> + Send>;
 }

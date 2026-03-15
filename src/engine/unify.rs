@@ -10,8 +10,6 @@ use super::term::{StringPatternPart, Term};
 /// On failure, `sub` may contain partial bindings and should be discarded.
 pub fn unify(pattern: &Term, value: &Value, sub: &mut Substitution) -> bool {
     match pattern {
-        Term::Wildcard => true,
-
         Term::Literal(lit) => lit == value,
 
         Term::Variable(name) => {
@@ -144,18 +142,6 @@ mod tests {
         sub.bind("x".into(), Value::int(42, span()));
         assert!(unify(&pattern, &Value::int(42, span()), &mut sub));
         assert!(!unify(&pattern, &Value::int(99, span()), &mut sub));
-    }
-
-    #[test]
-    fn wildcard_matches_anything() {
-        let mut sub = Substitution::new();
-        assert!(unify(&Term::Wildcard, &Value::int(1, span()), &mut sub));
-        assert!(unify(
-            &Term::Wildcard,
-            &Value::string("x", span()),
-            &mut sub
-        ));
-        assert!(sub.into_bindings().is_empty());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use nu_plugin::Plugin;
 
-use commands::{Facts, FactsClear, FactsList, Solve};
+use commands::{Facts, Solve};
 use engine::native::NativeEngine;
 use engine::LogicEngine;
 use store::FactStore;
@@ -31,11 +31,6 @@ impl Plugin for LogicPlugin {
     }
 
     fn commands(&self) -> Vec<Box<dyn nu_plugin::PluginCommand<Plugin = Self>>> {
-        vec![
-            Box::new(Solve),
-            Box::new(Facts),
-            Box::new(FactsList),
-            Box::new(FactsClear),
-        ]
+        vec![Box::new(Solve), Box::new(Facts)]
     }
 }

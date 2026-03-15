@@ -1,5 +1,5 @@
 mod facts;
 mod solve;
 
-pub use facts::{Facts, FactsClear, FactsList};
+pub use facts::Facts;
 pub use solve::Solve;

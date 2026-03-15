@@ -1,0 +1,17 @@
+[package]
+name = "nu_plugin_logic"
+version = "0.1.0"
+edition = "2024"
+description = "Logic programming primitives for Nushell — unification, relational queries, and constraint solving over structured data"
+license = "MIT"
+
+[[bin]]
+name = "nu_plugin_logic"
+path = "src/main.rs"
+
+[dependencies]
+nu-plugin = "0.111.0"
+nu-protocol = { version = "0.111.0", features = ["plugin"] }
+
+[dev-dependencies]
+nu-plugin-test-support = "0.111.0"

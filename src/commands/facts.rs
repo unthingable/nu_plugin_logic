@@ -1,6 +1,7 @@
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{
-    Category, LabeledError, PipelineData, Record, Signature, SyntaxShape, Type, Value,
+    Category, LabeledError, ListStream, PipelineData, Record, Signals, Signature, SyntaxShape,
+    Type, Value,
 };
 
 use crate::LogicPlugin;
@@ -16,13 +17,30 @@ impl PluginCommand for Facts {
 
     fn signature(&self) -> Signature {
         Signature::build("facts")
-            .input_output_types(vec![(Type::Any, Type::Nothing)])
-            .required("name", SyntaxShape::String, "name to store facts under")
+            .input_output_types(vec![(Type::Any, Type::Any)])
+            .optional("name", SyntaxShape::String, "fact set name")
+            .switch("drop", "remove the named fact set", None)
+            .switch("clear", "remove all fact sets", None)
             .category(Category::Filters)
     }
 
     fn description(&self) -> &str {
-        "Store pipeline data as named facts for use with solve"
+        "Store, retrieve, and manage named fact sets for use with solve"
+    }
+
+    fn extra_description(&self) -> &str {
+        r#"With pipeline input: store data and pass it through
+  ls | facts files | where size > 1kb
+
+Without input: retrieve stored data
+  facts files
+
+No arguments: list all registered fact sets
+  facts
+
+Management:
+  facts files --drop    # remove one fact set
+  facts --clear         # remove all fact sets"#
     }
 
     fn run(
@@ -32,113 +50,83 @@ impl PluginCommand for Facts {
         call: &EvaluatedCall,
         input: PipelineData,
     ) -> Result<PipelineData, LabeledError> {
-        let name: String = call.req(0)?;
-        let values: Vec<Value> = input.into_iter().collect();
-
-        plugin
-            .store
-            .lock()
-            .map_err(|e| LabeledError::new(format!("lock error: {e}")))?
-            .assert_facts(name, values);
-
-        Ok(PipelineData::Empty)
-    }
-}
-
-pub struct FactsList;
-
-impl PluginCommand for FactsList {
-    type Plugin = LogicPlugin;
-
-    fn name(&self) -> &str {
-        "facts list"
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::build("facts list")
-            .input_output_types(vec![(Type::Nothing, Type::Any)])
-            .category(Category::Filters)
-    }
-
-    fn description(&self) -> &str {
-        "List registered fact sets"
-    }
-
-    fn run(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        call: &EvaluatedCall,
-        _input: PipelineData,
-    ) -> Result<PipelineData, LabeledError> {
-        let span = call.head;
-        let store = plugin
-            .store
-            .lock()
-            .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
-
-        let rows: Vec<Value> = store
-            .list()
-            .into_iter()
-            .map(|(name, count)| {
-                let mut record = Record::new();
-                record.push("name", Value::string(name, span));
-                record.push("rows", Value::int(count as i64, span));
-                Value::record(record, span)
-            })
-            .collect();
-
-        Ok(PipelineData::Value(Value::list(rows, span), None))
-    }
-}
-
-pub struct FactsClear;
-
-impl PluginCommand for FactsClear {
-    type Plugin = LogicPlugin;
-
-    fn name(&self) -> &str {
-        "facts clear"
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::build("facts clear")
-            .input_output_types(vec![(Type::Nothing, Type::Nothing)])
-            .optional("name", SyntaxShape::String, "fact set to clear (omit to clear all)")
-            .category(Category::Filters)
-    }
-
-    fn description(&self) -> &str {
-        "Clear fact sets"
-    }
-
-    fn run(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        call: &EvaluatedCall,
-        _input: PipelineData,
-    ) -> Result<PipelineData, LabeledError> {
         let span = call.head;
         let name: Option<String> = call.opt(0)?;
+        let do_drop = call.has_flag("drop")?;
+        let clear = call.has_flag("clear")?;
 
-        let mut store = plugin
-            .store
-            .lock()
-            .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
-
-        match name {
-            Some(name) => {
-                if !store.clear(&name) {
-                    return Err(
-                        LabeledError::new(format!("Unknown fact set: '{name}'"))
-                            .with_label("not registered", span),
-                    );
-                }
-            }
-            None => store.clear_all(),
+        if clear {
+            plugin
+                .store
+                .lock()
+                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?
+                .clear_all();
+            return Ok(PipelineData::Empty);
         }
 
-        Ok(PipelineData::Empty)
+        if do_drop {
+            let name = name.ok_or_else(|| {
+                LabeledError::new("--drop requires a fact set name")
+                    .with_label("specify which fact set to drop", span)
+            })?;
+            let mut store = plugin
+                .store
+                .lock()
+                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
+            if !store.clear(&name) {
+                return Err(
+                    LabeledError::new(format!("Unknown fact set: '{name}'"))
+                        .with_label("not registered", span),
+                );
+            }
+            return Ok(PipelineData::Empty);
+        }
+
+        let Some(name) = name else {
+            // No name → list all fact sets
+            let store = plugin
+                .store
+                .lock()
+                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
+            let rows: Vec<Value> = store
+                .list()
+                .into_iter()
+                .map(|(name, count)| {
+                    let mut record = Record::new();
+                    record.push("name", Value::string(name, span));
+                    record.push("rows", Value::int(count as i64, span));
+                    Value::record(record, span)
+                })
+                .collect();
+            return Ok(PipelineData::Value(Value::list(rows, span), None));
+        };
+
+        if matches!(input, PipelineData::Empty) {
+            // No input → retrieve
+            let store = plugin
+                .store
+                .lock()
+                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
+            let facts = store
+                .get(&name)
+                .ok_or_else(|| {
+                    LabeledError::new(format!("Unknown fact set: '{name}'"))
+                        .with_label("not registered", span)
+                })?
+                .clone();
+            drop(store);
+            let stream = ListStream::new(facts.into_iter(), span, Signals::empty());
+            Ok(PipelineData::ListStream(stream, None))
+        } else {
+            // Has input → store + passthrough
+            let values: Vec<Value> = input.into_iter().collect();
+            plugin
+                .store
+                .lock()
+                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?
+                .assert_facts(name, values.clone());
+            let stream = ListStream::new(values.into_iter(), span, Signals::empty());
+            Ok(PipelineData::ListStream(stream, None))
+        }
     }
 }
