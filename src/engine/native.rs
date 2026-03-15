@@ -33,7 +33,9 @@ impl LogicEngine for NativeEngine {
             for (col, val) in record.iter() {
                 result.push(col.to_string(), val.clone());
             }
-            for (name, value) in bindings {
+            let mut sorted_bindings: Vec<_> = bindings.into_iter().collect();
+            sorted_bindings.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, value) in sorted_bindings {
                 if result.get(&name).is_none() {
                     result.push(name, value);
                 }
