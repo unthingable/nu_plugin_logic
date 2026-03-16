@@ -8,6 +8,12 @@ pub struct Substitution {
     bindings: Vec<(String, Value)>,
 }
 
+impl Default for Substitution {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Substitution {
     pub fn new() -> Self {
         Self {
@@ -16,12 +22,8 @@ impl Substitution {
     }
 
     pub fn bind(&mut self, name: String, value: Value) {
-        // Update if already bound, otherwise append
-        if let Some(entry) = self.bindings.iter_mut().find(|(k, _)| k == &name) {
-            entry.1 = value;
-        } else {
-            self.bindings.push((name, value));
-        }
+        debug_assert!(self.get(&name).is_none(), "bind called for already-bound variable: {name}");
+        self.bindings.push((name, value));
     }
 
     pub fn get(&self, name: &str) -> Option<&Value> {

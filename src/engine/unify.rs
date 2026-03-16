@@ -6,44 +6,69 @@ use super::term::{StringPatternPart, Term};
 /// Attempt to unify a pattern against a concrete Nushell value,
 /// accumulating variable bindings in `sub`.
 ///
-/// Returns `true` if the pattern matches, `false` otherwise.
+/// Returns:
+/// - `Ok(true)` — pattern matches the value
+/// - `Ok(false)` — pattern could apply but this value doesn't match
+///   (e.g., literal mismatch, variable already bound to a different value)
+/// - `Err(msg)` — structural problem: the pattern *cannot* apply to this data
+///   (e.g., record pattern references a field that doesn't exist, string pattern
+///   applied to a non-string value)
+///
 /// On failure, `sub` may contain partial bindings and should be discarded.
-pub fn unify(pattern: &Term, value: &Value, sub: &mut Substitution) -> bool {
+pub fn unify(pattern: &Term, value: &Value, sub: &mut Substitution) -> Result<bool, String> {
     match pattern {
-        Term::Literal(lit) => lit == value,
+        Term::Literal(lit) => Ok(lit == value),
 
-        Term::Variable(name) => {
-            if let Some(bound) = sub.get(name) {
-                bound == value
-            } else {
-                sub.bind(name.clone(), value.clone());
-                true
-            }
-        }
+        Term::Variable(name) => bind_or_check_value(name, value, sub),
 
         Term::Record(fields) => {
             let Value::Record { val: record, .. } = value else {
-                return false;
+                return Ok(false);
             };
             for (field_name, field_pattern) in fields {
                 match record.get(field_name) {
                     Some(field_value) => {
-                        if !unify(field_pattern, field_value, sub) {
-                            return false;
+                        if !unify(field_pattern, field_value, sub)? {
+                            return Ok(false);
                         }
                     }
-                    None => return false,
+                    None => {
+                        let available: Vec<&str> =
+                            record.columns().map(|c| c.as_str()).collect();
+                        return Err(format!(
+                            "pattern field '{}' not found in record (available: {})",
+                            field_name,
+                            available.join(", ")
+                        ));
+                    }
                 }
             }
-            true
+            Ok(true)
         }
 
         Term::StringPattern(parts) => {
             let Value::String { val: s, .. } = value else {
-                return false;
+                return Err(format!(
+                    "string pattern cannot match non-string value (got {})",
+                    value.get_type()
+                ));
             };
             unify_string_pattern(parts, s, sub)
         }
+    }
+}
+
+/// Bind-or-check for a full Value (used by Term::Variable).
+fn bind_or_check_value(
+    name: &str,
+    value: &Value,
+    sub: &mut Substitution,
+) -> Result<bool, String> {
+    if let Some(bound) = sub.get(name) {
+        Ok(bound == value)
+    } else {
+        sub.bind(name.to_string(), value.clone());
+        Ok(true)
     }
 }
 
@@ -53,13 +78,18 @@ pub fn unify(pattern: &Term, value: &Value, sub: &mut Substitution) -> bool {
 /// the text between literals. When a variable is followed (eventually) by a
 /// literal, the leftmost occurrence of that literal delimits the variable's
 /// capture. A trailing variable captures the remainder of the string.
-fn unify_string_pattern(parts: &[StringPatternPart], s: &str, sub: &mut Substitution) -> bool {
+fn unify_string_pattern(
+    parts: &[StringPatternPart],
+    s: &str,
+    sub: &mut Substitution,
+) -> Result<bool, String> {
     match parts {
-        [] => s.is_empty(),
+        [] => Ok(s.is_empty()),
 
-        [StringPatternPart::Literal(lit), rest @ ..] => s
-            .strip_prefix(lit.as_str())
-            .is_some_and(|remaining| unify_string_pattern(rest, remaining, sub)),
+        [StringPatternPart::Literal(lit), rest @ ..] => match s.strip_prefix(lit.as_str()) {
+            Some(remaining) => unify_string_pattern(rest, remaining, sub),
+            None => Ok(false),
+        },
 
         [StringPatternPart::Variable(name)] => {
             // Last part — variable captures the rest of the string
@@ -73,30 +103,35 @@ fn unify_string_pattern(parts: &[StringPatternPart], s: &str, sub: &mut Substitu
                 _ => None,
             });
             match next_lit {
-                Some(lit) => {
-                    // Variable captures everything before the leftmost occurrence
-                    s.find(lit).is_some_and(|pos| {
-                        bind_or_check(name, &s[..pos], sub)
-                            && unify_string_pattern(rest, &s[pos..], sub)
-                    })
-                }
+                Some(lit) => match s.find(lit) {
+                    Some(pos) => {
+                        if !bind_or_check(name, &s[..pos], sub)? {
+                            return Ok(false);
+                        }
+                        unify_string_pattern(rest, &s[pos..], sub)
+                    }
+                    None => Ok(false),
+                },
                 None => {
                     // No more literals — adjacent trailing variables.
                     // Give this one empty string; last variable gets everything.
-                    bind_or_check(name, "", sub) && unify_string_pattern(rest, s, sub)
+                    if !bind_or_check(name, "", sub)? {
+                        return Ok(false);
+                    }
+                    unify_string_pattern(rest, s, sub)
                 }
             }
         }
     }
 }
 
-fn bind_or_check(name: &str, value: &str, sub: &mut Substitution) -> bool {
+fn bind_or_check(name: &str, value: &str, sub: &mut Substitution) -> Result<bool, String> {
     let val = Value::string(value, Span::unknown());
     if let Some(bound) = sub.get(name) {
-        *bound == val
+        Ok(*bound == val)
     } else {
         sub.bind(name.to_string(), val);
-        true
+        Ok(true)
     }
 }
 
@@ -115,7 +150,7 @@ mod tests {
         let pattern = Term::Literal(Value::string("file", span()));
         let value = Value::string("file", span());
         let mut sub = Substitution::new();
-        assert!(unify(&pattern, &value, &mut sub));
+        assert!(unify(&pattern, &value, &mut sub).unwrap());
     }
 
     #[test]
@@ -123,7 +158,7 @@ mod tests {
         let pattern = Term::Literal(Value::string("file", span()));
         let value = Value::string("dir", span());
         let mut sub = Substitution::new();
-        assert!(!unify(&pattern, &value, &mut sub));
+        assert!(!unify(&pattern, &value, &mut sub).unwrap());
     }
 
     #[test]
@@ -131,7 +166,7 @@ mod tests {
         let pattern = Term::Variable("x".into());
         let value = Value::string("hello", span());
         let mut sub = Substitution::new();
-        assert!(unify(&pattern, &value, &mut sub));
+        assert!(unify(&pattern, &value, &mut sub).unwrap());
         assert_eq!(sub.get("x"), Some(&Value::string("hello", span())));
     }
 
@@ -140,8 +175,8 @@ mod tests {
         let pattern = Term::Variable("x".into());
         let mut sub = Substitution::new();
         sub.bind("x".into(), Value::int(42, span()));
-        assert!(unify(&pattern, &Value::int(42, span()), &mut sub));
-        assert!(!unify(&pattern, &Value::int(99, span()), &mut sub));
+        assert!(unify(&pattern, &Value::int(42, span()), &mut sub).unwrap());
+        assert!(!unify(&pattern, &Value::int(99, span()), &mut sub).unwrap());
     }
 
     #[test]
@@ -158,10 +193,10 @@ mod tests {
             rec.push("name", Value::string("&f", span()));
             Value::record(rec, span())
         };
-        let pattern = value_to_pattern(&pattern_val);
+        let pattern = value_to_pattern(&pattern_val).unwrap();
 
         let mut sub = Substitution::new();
-        assert!(unify(&pattern, &value, &mut sub));
+        assert!(unify(&pattern, &value, &mut sub).unwrap());
         assert_eq!(sub.get("f"), Some(&Value::string("main.rs", span())));
     }
 
@@ -172,7 +207,7 @@ mod tests {
             StringPatternPart::Literal(".rs".into()),
         ];
         let mut sub = Substitution::new();
-        assert!(unify_string_pattern(&parts, "main.rs", &mut sub));
+        assert!(unify_string_pattern(&parts, "main.rs", &mut sub).unwrap());
         assert_eq!(sub.get("stem"), Some(&Value::string("main", span())));
     }
 
@@ -183,7 +218,7 @@ mod tests {
             StringPatternPart::Variable("name".into()),
         ];
         let mut sub = Substitution::new();
-        assert!(unify_string_pattern(&parts, "test_foo", &mut sub));
+        assert!(unify_string_pattern(&parts, "test_foo", &mut sub).unwrap());
         assert_eq!(sub.get("name"), Some(&Value::string("foo", span())));
     }
 
@@ -194,7 +229,7 @@ mod tests {
             StringPatternPart::Literal(".rs".into()),
         ];
         let mut sub = Substitution::new();
-        assert!(!unify_string_pattern(&parts, "main.py", &mut sub));
+        assert!(!unify_string_pattern(&parts, "main.py", &mut sub).unwrap());
     }
 
     #[test]
@@ -205,7 +240,7 @@ mod tests {
             StringPatternPart::Variable("ext".into()),
         ];
         let mut sub = Substitution::new();
-        assert!(unify_string_pattern(&parts, "main.rs", &mut sub));
+        assert!(unify_string_pattern(&parts, "main.rs", &mut sub).unwrap());
         assert_eq!(sub.get("name"), Some(&Value::string("main", span())));
         assert_eq!(sub.get("ext"), Some(&Value::string("rs", span())));
     }
@@ -221,7 +256,7 @@ mod tests {
             StringPatternPart::Variable("c".into()),
         ];
         let mut sub = Substitution::new();
-        assert!(unify_string_pattern(&parts, "x.y.z", &mut sub));
+        assert!(unify_string_pattern(&parts, "x.y.z", &mut sub).unwrap());
         assert_eq!(sub.get("a"), Some(&Value::string("x", span())));
         assert_eq!(sub.get("b"), Some(&Value::string("y", span())));
         assert_eq!(sub.get("c"), Some(&Value::string("z", span())));
@@ -236,7 +271,7 @@ mod tests {
             StringPatternPart::Variable("b".into()),
         ];
         let mut sub = Substitution::new();
-        assert!(unify_string_pattern(&parts, "x.y.z", &mut sub));
+        assert!(unify_string_pattern(&parts, "x.y.z", &mut sub).unwrap());
         assert_eq!(sub.get("a"), Some(&Value::string("x", span())));
         assert_eq!(sub.get("b"), Some(&Value::string("y.z", span())));
     }
@@ -258,10 +293,10 @@ mod tests {
             outer.push("config", Value::record(inner, span()));
             Value::record(outer, span())
         };
-        let pattern = value_to_pattern(&pattern_val);
+        let pattern = value_to_pattern(&pattern_val).unwrap();
 
         let mut sub = Substitution::new();
-        assert!(unify(&pattern, &value, &mut sub));
+        assert!(unify(&pattern, &value, &mut sub).unwrap());
         assert_eq!(sub.get("port"), Some(&Value::int(8080, span())));
     }
 }

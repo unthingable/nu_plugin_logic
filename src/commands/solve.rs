@@ -1,7 +1,7 @@
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{
-    Category, LabeledError, ListStream, PipelineData, Record, Signals, Signature, SyntaxShape,
-    Type, Value,
+    Category, LabeledError, ListStream, PipelineData, Record, ShellError, Signature, Span,
+    SyntaxShape, Type, Value,
 };
 
 use crate::engine::convert::{is_kv_list, value_to_pattern};
@@ -9,6 +9,29 @@ use crate::engine::term::Term;
 use crate::store::FactStore;
 use crate::LogicEngine;
 use crate::LogicPlugin;
+
+type Sources = Vec<(Term, Vec<Value>)>;
+
+/// Convert an engine iterator of `Result<Value, String>` into a `Value` iterator
+/// suitable for `ListStream`. On the first `Err`, yields a `Value::Error` and stops.
+fn engine_results_to_values(
+    iter: Box<dyn Iterator<Item = Result<Value, String>> + Send>,
+    span: Span,
+) -> impl Iterator<Item = Value> + Send {
+    iter.map(move |r| match r {
+        Ok(v) => v,
+        Err(msg) => Value::error(
+            ShellError::GenericError {
+                error: msg,
+                msg: "structural mismatch in pattern".into(),
+                span: Some(span),
+                help: None,
+                inner: vec![],
+            },
+            span,
+        ),
+    })
+}
 
 pub struct Solve;
 
@@ -58,7 +81,7 @@ Results stream lazily — piping to `first N` short-circuits after N solutions."
     fn run(
         &self,
         plugin: &Self::Plugin,
-        _engine: &EngineInterface,
+        engine: &EngineInterface,
         call: &EvaluatedCall,
         input: PipelineData,
     ) -> Result<PipelineData, LabeledError> {
@@ -75,7 +98,8 @@ Results stream lazily — piping to `first N` short-circuits after N solutions."
             if let Some(sources) = sources_from_inline_list(&pattern_val, &store, span)? {
                 drop(store);
                 let iter = plugin.engine.search(sources, span);
-                let stream = ListStream::new(iter, span, Signals::empty());
+                let values = engine_results_to_values(iter, span);
+                let stream = ListStream::new(values, span, engine.signals().clone());
                 return Ok(PipelineData::ListStream(stream, None));
             }
             drop(store);
@@ -114,7 +138,8 @@ Results stream lazily — piping to `first N` short-circuits after N solutions."
             if input_has_sources {
                 let sources = sources_from_pipeline(input, record, span)?;
                 let iter = plugin.engine.search(sources, span);
-                let stream = ListStream::new(iter, span, Signals::empty());
+                let values = engine_results_to_values(iter, span);
+                let stream = ListStream::new(values, span, engine.signals().clone());
                 return Ok(PipelineData::ListStream(stream, None));
             }
 
@@ -128,22 +153,29 @@ Results stream lazily — piping to `first N` short-circuits after N solutions."
                 let mut sources = Vec::new();
                 for (source_name, pattern_val) in record.iter() {
                     let facts = store.get(source_name).unwrap().clone();
-                    sources.push((value_to_pattern(pattern_val), facts));
+                    let pat = value_to_pattern(pattern_val).map_err(|e| {
+                        LabeledError::new(e).with_label("invalid pattern", span)
+                    })?;
+                    sources.push((pat, facts));
                 }
                 drop(store);
 
                 let iter = plugin.engine.search(sources, span);
-                let stream = ListStream::new(iter, span, Signals::empty());
+                let values = engine_results_to_values(iter, span);
+                let stream = ListStream::new(values, span, engine.signals().clone());
                 return Ok(PipelineData::ListStream(stream, None));
             }
             // Not in store either — fall through to single-source
         }
 
         // Single-source mode: filter pipeline input
-        let pattern = value_to_pattern(&pattern_val);
-        let rows: Vec<Value> = input.into_iter().collect();
-        let iter = plugin.engine.filter(pattern, rows, span);
-        let stream = ListStream::new(iter, span, Signals::empty());
+        let pattern = value_to_pattern(&pattern_val)
+            .map_err(|e| LabeledError::new(e).with_label("invalid pattern", span))?;
+        let iter = plugin
+            .engine
+            .filter(pattern, Box::new(input.into_iter()), span);
+        let values = engine_results_to_values(iter, span);
+        let stream = ListStream::new(values, span, engine.signals().clone());
         Ok(PipelineData::ListStream(stream, None))
     }
 }
@@ -155,7 +187,7 @@ fn sources_from_inline_list(
     val: &Value,
     store: &FactStore,
     span: nu_protocol::Span,
-) -> Result<Option<Vec<(Term, Vec<Value>)>>, LabeledError> {
+) -> Result<Option<Sources>, LabeledError> {
     let Value::List { vals, .. } = val else {
         return Ok(None);
     };
@@ -164,9 +196,9 @@ fn sources_from_inline_list(
         return Ok(None);
     }
 
-    let is_pairs = vals.chunks(2).all(|pair| {
-        is_data_source(&pair[0]) && is_pattern_like(&pair[1])
-    });
+    let is_pairs = vals
+        .chunks(2)
+        .all(|pair| is_data_source(&pair[0]) && is_pattern_like(&pair[1]));
 
     if !is_pairs {
         return Ok(None);
@@ -175,7 +207,9 @@ fn sources_from_inline_list(
     let mut sources = Vec::new();
     for pair in vals.chunks(2) {
         let data = resolve_data_source(&pair[0], store, span)?;
-        let pattern = value_to_pattern(&pair[1]);
+        let pattern = value_to_pattern(&pair[1]).map_err(|e| {
+            LabeledError::new(e).with_label("invalid pattern", span)
+        })?;
         sources.push((pattern, data));
     }
 
@@ -198,7 +232,7 @@ fn resolve_data_source(
     span: nu_protocol::Span,
 ) -> Result<Vec<Value>, LabeledError> {
     match v {
-        Value::List { vals, .. } => Ok(vals.iter().cloned().collect()),
+        Value::List { vals, .. } => Ok(vals.to_vec()),
         Value::String { val, .. } if val.starts_with('@') => {
             let name = &val[1..];
             let facts = store
@@ -247,7 +281,7 @@ fn sources_from_pipeline(
     input: PipelineData,
     pattern_record: &impl std::ops::Deref<Target = nu_protocol::Record>,
     span: nu_protocol::Span,
-) -> Result<Vec<(Term, Vec<Value>)>, LabeledError> {
+) -> Result<Sources, LabeledError> {
     let PipelineData::Value(Value::Record { val: input_record, .. }, _) = input else {
         unreachable!("caller verified input is a record");
     };
@@ -259,14 +293,17 @@ fn sources_from_pipeline(
                 .with_label("not found in pipeline input", span)
         })?;
         let facts: Vec<Value> = if let Value::List { vals, .. } = data {
-            vals.iter().cloned().collect()
+            vals.to_vec()
         } else {
             return Err(
                 LabeledError::new(format!("Source '{source_name}' is not a table"))
                     .with_label("expected a list of records", span),
             );
         };
-        sources.push((value_to_pattern(pattern_val), facts));
+        let pat = value_to_pattern(pattern_val).map_err(|e| {
+            LabeledError::new(e).with_label("invalid pattern", span)
+        })?;
+        sources.push((pat, facts));
     }
     Ok(sources)
 }

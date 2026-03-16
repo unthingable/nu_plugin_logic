@@ -16,6 +16,12 @@ pub struct LogicPlugin {
     pub(crate) engine: NativeEngine,
 }
 
+impl Default for LogicPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LogicPlugin {
     pub fn new() -> Self {
         Self {

@@ -1,7 +1,6 @@
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{
-    Category, LabeledError, ListStream, PipelineData, Record, Signals, Signature, SyntaxShape,
-    Type, Value,
+    Category, LabeledError, ListStream, PipelineData, Record, Signature, SyntaxShape, Type, Value,
 };
 
 use crate::LogicPlugin;
@@ -46,7 +45,7 @@ Management:
     fn run(
         &self,
         plugin: &Self::Plugin,
-        _engine: &EngineInterface,
+        engine: &EngineInterface,
         call: &EvaluatedCall,
         input: PipelineData,
     ) -> Result<PipelineData, LabeledError> {
@@ -56,12 +55,22 @@ Management:
         let clear = call.has_flag("clear")?;
 
         if clear {
-            plugin
+            let mut store = plugin
                 .store
                 .lock()
-                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?
-                .clear_all();
-            return Ok(PipelineData::Empty);
+                .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
+            let cleared: Vec<Value> = store
+                .list()
+                .into_iter()
+                .map(|(name, count)| {
+                    let mut record = Record::new();
+                    record.push("name", Value::string(name, span));
+                    record.push("rows", Value::int(count as i64, span));
+                    Value::record(record, span)
+                })
+                .collect();
+            store.clear_all();
+            return Ok(PipelineData::Value(Value::list(cleared, span), None));
         }
 
         if do_drop {
@@ -73,13 +82,18 @@ Management:
                 .store
                 .lock()
                 .map_err(|e| LabeledError::new(format!("lock error: {e}")))?;
-            if !store.clear(&name) {
-                return Err(
+            let row_count = store
+                .get(&name)
+                .ok_or_else(|| {
                     LabeledError::new(format!("Unknown fact set: '{name}'"))
-                        .with_label("not registered", span),
-                );
-            }
-            return Ok(PipelineData::Empty);
+                        .with_label("not registered", span)
+                })?
+                .len();
+            store.clear(&name);
+            let mut record = Record::new();
+            record.push("name", Value::string(&name, span));
+            record.push("rows", Value::int(row_count as i64, span));
+            return Ok(PipelineData::Value(Value::record(record, span), None));
         }
 
         let Some(name) = name else {
@@ -115,7 +129,7 @@ Management:
                 })?
                 .clone();
             drop(store);
-            let stream = ListStream::new(facts.into_iter(), span, Signals::empty());
+            let stream = ListStream::new(facts.into_iter(), span, engine.signals().clone());
             Ok(PipelineData::ListStream(stream, None))
         } else {
             // Has input → store + passthrough
@@ -124,8 +138,8 @@ Management:
                 .store
                 .lock()
                 .map_err(|e| LabeledError::new(format!("lock error: {e}")))?
-                .assert_facts(name, values.clone());
-            let stream = ListStream::new(values.into_iter(), span, Signals::empty());
+                .store_facts(name, values.clone());
+            let stream = ListStream::new(values.into_iter(), span, engine.signals().clone());
             Ok(PipelineData::ListStream(stream, None))
         }
     }

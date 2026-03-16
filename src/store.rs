@@ -7,6 +7,12 @@ pub struct FactStore {
     facts: HashMap<String, Vec<Value>>,
 }
 
+impl Default for FactStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FactStore {
     pub fn new() -> Self {
         Self {
@@ -14,7 +20,7 @@ impl FactStore {
         }
     }
 
-    pub fn assert_facts(&mut self, name: String, values: Vec<Value>) {
+    pub fn store_facts(&mut self, name: String, values: Vec<Value>) {
         self.facts.insert(name, values);
     }
 
