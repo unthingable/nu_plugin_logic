@@ -1,10 +1,10 @@
 use nu_plugin::{EngineInterface, EvaluatedCall, PluginCommand};
 use nu_protocol::{
-    Category, LabeledError, ListStream, PipelineData, Record, ShellError, Signature, Span,
-    SyntaxShape, Type, Value,
+    Category, LabeledError, ListStream, PipelineData, ShellError, Signature, Span, SyntaxShape,
+    Type, Value,
 };
 
-use crate::engine::convert::{is_kv_list, value_to_pattern};
+use crate::engine::convert::value_to_pattern;
 use crate::engine::term::Term;
 use crate::store::FactStore;
 use crate::LogicEngine;
@@ -55,10 +55,12 @@ impl PluginCommand for Solve {
 
     fn extra_description(&self) -> &str {
         r#"Single-source mode (pipeline input):
+  ls | solve [type:file &name &size]
   ls | solve [type file, name &stem.rs]
   ls | solve {type: "file", name: "&stem.rs"}
 
-Multi-source inline (data paired with patterns):
+Multi-source inline:
+  solve [$proc [&pid &name] $ports [&pid &port]]
   solve [$proc [pid &pid, name &name], $ports [pid &pid, port &port]]
 
 Multi-source via fact store:
@@ -71,7 +73,12 @@ Multi-source via pipeline:
 Mixed (inline data + stored facts):
   solve [$fresh [pid &pid], @stored [pid &pid, port &port]]
 
-Patterns use [k v] list syntax or {k: v} record syntax interchangeably.
+Pattern list forms (all equivalent for extracting field `name`):
+  &name          standalone extraction (field and variable both 'name')
+  name:&name     infix colon pair
+  name: &name    trailing colon pair
+  name &name     bare pair
+
 &-prefixed strings are logic variables. $-prefixed are nushell variables.
 @-prefixed source names reference fact sets.
 
@@ -105,15 +112,22 @@ Results stream lazily — piping to `first N` short-circuits after N solutions."
             drop(store);
         }
 
-        // Convert list [k v k v] to record {k: v, k: v} if applicable
-        let pattern_val = list_to_record_value(&pattern_val).unwrap_or(pattern_val);
+        // Pattern must be a record (or list parsed as record pattern) for remaining modes.
+        // Lists are handled via value_to_pattern which now parses flexible pattern syntax.
+        if !matches!(&pattern_val, Value::Record { .. }) {
+            // Try single-source filter with flexible pattern parsing
+            let pattern = value_to_pattern(&pattern_val)
+                .map_err(|e| LabeledError::new(e).with_label("invalid pattern", span))?;
+            let iter = plugin
+                .engine
+                .filter(pattern, Box::new(input.into_iter()), span);
+            let values = engine_results_to_values(iter, span);
+            let stream = ListStream::new(values, span, engine.signals().clone());
+            return Ok(PipelineData::ListStream(stream, None));
+        }
 
-        // Pattern must be a record for remaining modes
         let Value::Record { val: record, .. } = &pattern_val else {
-            return Err(
-                LabeledError::new("solve expects a pattern as {k: v} or [k v]")
-                    .with_label("expected a record or key-value list", span),
-            );
+            unreachable!()
         };
 
         // Multi-source mode: pattern is record-of-records
@@ -248,32 +262,18 @@ fn resolve_data_source(
     }
 }
 
-/// A value looks like a pattern if it's a record or a key-value list.
+/// A value looks like a pattern if it's a record, or a non-empty list whose
+/// first element is a string that doesn't start with `@` (data source lists
+/// contain records as elements, not strings).
 fn is_pattern_like(v: &Value) -> bool {
     match v {
         Value::Record { .. } => true,
-        Value::List { vals, .. } => is_kv_list(vals),
+        Value::List { vals, .. } => {
+            !vals.is_empty()
+                && matches!(&vals[0], Value::String { val, .. } if !val.starts_with('@'))
+        }
         _ => false,
     }
-}
-
-/// Convert a list [k v k v] to a record {k: v, k: v} if all keys are plain strings.
-fn list_to_record_value(val: &Value) -> Option<Value> {
-    let Value::List { vals, .. } = val else {
-        return None;
-    };
-    if !is_kv_list(vals) {
-        return None;
-    }
-    let mut record = Record::new();
-    for pair in vals.chunks(2) {
-        let key = match &pair[0] {
-            Value::String { val, .. } => val.clone(),
-            _ => unreachable!(),
-        };
-        record.push(key, pair[1].clone());
-    }
-    Some(Value::record(record, val.span()))
 }
 
 /// Extract sources from a pipeline record-of-tables.
