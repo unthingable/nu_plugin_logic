@@ -97,6 +97,18 @@ fn unify_string_pattern(
         }
 
         [StringPatternPart::Variable(name), rest @ ..] => {
+            // If already bound, treat as literal prefix
+            if let Some(bound) = sub.get(name) {
+                let bound_str = match bound {
+                    Value::String { val, .. } => val.clone(),
+                    _ => return Ok(false),
+                };
+                return match s.strip_prefix(bound_str.as_str()) {
+                    Some(remaining) => unify_string_pattern(rest, remaining, sub),
+                    None => Ok(false),
+                };
+            }
+
             // Find the next literal to use as a delimiter
             let next_lit = rest.iter().find_map(|p| match p {
                 StringPatternPart::Literal(lit) => Some(lit.as_str()),
@@ -298,5 +310,46 @@ mod tests {
         let mut sub = Substitution::new();
         assert!(unify(&pattern, &value, &mut sub).unwrap());
         assert_eq!(sub.get("port"), Some(&Value::int(8080, span())));
+    }
+
+    #[test]
+    fn bound_variable_string_pattern_prefix() {
+        // &service already bound to "web-prod", pattern &service-&id against "web-prod-abc123"
+        let parts = vec![
+            StringPatternPart::Variable("service".into()),
+            StringPatternPart::Literal("-".into()),
+            StringPatternPart::Variable("id".into()),
+        ];
+        let mut sub = Substitution::new();
+        sub.bind("service".into(), Value::string("web-prod", span()));
+        assert!(unify_string_pattern(&parts, "web-prod-abc123", &mut sub).unwrap());
+        assert_eq!(sub.get("id"), Some(&Value::string("abc123", span())));
+    }
+
+    #[test]
+    fn bound_variable_string_pattern_mismatch() {
+        // &service bound to "api", pattern &service-&id against "web-prod-abc123"
+        let parts = vec![
+            StringPatternPart::Variable("service".into()),
+            StringPatternPart::Literal("-".into()),
+            StringPatternPart::Variable("id".into()),
+        ];
+        let mut sub = Substitution::new();
+        sub.bind("service".into(), Value::string("api", span()));
+        assert!(!unify_string_pattern(&parts, "web-prod-abc123", &mut sub).unwrap());
+    }
+
+    #[test]
+    fn bound_variable_with_delimiter_inside_value() {
+        // &a bound to "x.y", pattern &a.&b against "x.y.z"
+        let parts = vec![
+            StringPatternPart::Variable("a".into()),
+            StringPatternPart::Literal(".".into()),
+            StringPatternPart::Variable("b".into()),
+        ];
+        let mut sub = Substitution::new();
+        sub.bind("a".into(), Value::string("x.y", span()));
+        assert!(unify_string_pattern(&parts, "x.y.z", &mut sub).unwrap());
+        assert_eq!(sub.get("b"), Some(&Value::string("z", span())));
     }
 }

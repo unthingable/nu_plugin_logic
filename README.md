@@ -315,7 +315,7 @@ let ports = (open ports.csv | update pid {into int})
 solve [$procs [&pid &name] $ports [&pid &port]]
 ```
 
-**String decomposition is greedy-to-first.** `&a-&b` against `"web-prod-abc"` gives `a=web`, `b=prod-abc` — the first variable captures up to the first delimiter match. If your data has delimiters inside values, the split may not land where you expect.
+**String decomposition splits at the first delimiter.** `&a-&b` against `"web-prod-abc"` gives `a=web`, `b=prod-abc`. If a value contains the delimiter character, use a more specific pattern or decompose in stages. When a variable is already bound from another source, it matches exactly — no ambiguity.
 
 **Multi-source results contain only bound variables.** This is by design — explicit `&` binding avoids column name collisions across sources. The `&var` shorthand keeps it concise: `&pid` instead of `pid:&pid`.
 
