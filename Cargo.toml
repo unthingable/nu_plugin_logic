@@ -2,8 +2,12 @@
 name = "nu_plugin_logic"
 version = "0.1.0"
 edition = "2024"
-description = "Logic programming primitives for Nushell — unification, relational queries, and constraint solving over structured data"
+description = "Prolog-style pattern matching and relational search for Nushell"
 license = "MIT"
+readme = "README.md"
+keywords = ["nushell", "plugin", "logic", "prolog", "unification"]
+categories = ["command-line-utilities"]
+repository = "https://github.com/unthingable/nu_plugin_logic"
 
 [[bin]]
 name = "nu_plugin_logic"
