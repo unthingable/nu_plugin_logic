@@ -1,6 +1,6 @@
 # nu_plugin_logic
 
-Prolog-style pattern matching and relational search for Nushell. Prefix variables with `&`, describe the shape of your answer — `solve` finds every valid combination through unification and backtracking.
+[Prolog](https://en.wikipedia.org/wiki/Prolog)-style pattern matching and relational search for [Nushell](https://www.nushell.sh/). Prefix variables with `&`, describe the shape of your answer — `solve` finds every valid combination through unification and backtracking.
 
 ```nushell
 let services = [
@@ -9,7 +9,7 @@ let services = [
 ]
 let deploys = [{name: web, env: prod}, {name: api, env: staging}]
 
-> solve [
+solve [
     $services {
         name: &svc, config: {port: &port},
         version: &major.&minor.&patch
